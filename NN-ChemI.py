@@ -3,6 +3,9 @@
 ### Version 0.1 Jingbai Li Nov 19 2019 add hybrid training module NNEG
 ### Version 0.2 Jingbai Li Nov 23 2019 reconstruct the code structure
 ### Version 0.3 Jingbai Li Dec  2 2019 minor fix, imporve random search protocal
+### Version 0.3 Jingbai Li Dec  4 2019 add fully random search
+### Version 0.3 Jingbai Li Apr  4 2020 add more output info (mean and deviation) in data process
+### Version 0.3 Jingbai Li Apr  6 2020 fix bugs in random search for NN
 import time,datetime,os,sys,json
 from optparse import OptionParser
 import numpy as np
@@ -21,6 +24,7 @@ description=''
 parser = OptionParser(usage=usage, description=description)
 parser.add_option('--td', dest='in_data',   type=str,   nargs=1, help='Training data in json format')
 parser.add_option('--pd', dest='pred_data', type=str,   nargs=1, help='Prediction data in json format')
+parser.add_option('--mr', dest='selc_data', type=int,   nargs=1, help='Select energy. 0 all; 1 casscf; 2 caspt2. Default is 0.',default=0)
 parser.add_option('--sl', dest='silent',    type=int,   nargs=1, help='=0 silent mode; =1 print verbose information; Default=0',default=0)
 parser.add_option('--gs', dest='gl_seed',   type=int,   nargs=1, help='Global random seed; Defualt=0',default=0)
 parser.add_option('--iw', dest='in_weight', type=int,   nargs=1, help='Neural Network modes: -2 hyper parameter search, requres Talos; -1 predict properties; 0 new train; >0 load trained weights',default=0)
@@ -72,9 +76,9 @@ def howlong(start,end):
 
 def params_space(space,var,par):
     #span hyperparameter space
-    if space[-1] == 0:
+    if   space[-1] == 0:
         params=[var]
-    else:
+    elif space[-1] > 0:
         params=[]
         start,end,step=space
         for i in range(step+1):
@@ -87,6 +91,16 @@ def params_space(space,var,par):
                     p=int(p)
             if p not in params:
                 params.append(p)
+    elif space[-1] < 0:
+        start,end,step=space
+        step=1+step*-1
+        np.random.seed(int(time.time()%1/0.001))  # set a random seed for random search
+        if   par == 'ep' or par == 'nlayer' or par == 'node' or par == 'flrstep' or par == 'bs':	   # random integer (last - initial)
+            params=np.random.choice(end-start+1,step,replace=False)+start
+        elif par == 'wl2' or par == 'lr' or par == 'flr':     # random float (0 - last/initial)
+            params=np.random.choice(101,step,replace=False)/100*end/start 
+            params=start**params
+        params=sorted(params)
     return params
 
 def update_params(candidates,space,par):
@@ -212,13 +226,18 @@ def Statistics(invr,energy,gradient,nac):
     ax[1,1].hist(np.ndarray.flatten(nac),color='black',bins=400)
     plt.savefig('model-stat.png',dpi=400)
 
-def Prepdata(data,silent,gl_seed,stat):
+def Prepdata(data,silent,gl_seed,stat,selc_data):
     data_info=''
     natom,nstate,invr,energy,gradient,nac=data
     invr=np.array(invr)
     energy=np.array(energy)
     gradient=np.array(gradient)
     nac=np.array(nac)
+
+    if selc_data == 1:
+        energy=energy[:,:nstate]
+    elif selc_data == 2:
+        energy=energy[:,nstate:]
 
     nmol=len(invr)                    # number of molecule
     ninvr=len(invr[0])                # number of distance per molecule, which is the input size
@@ -267,13 +286,18 @@ def Prepdata(data,silent,gl_seed,stat):
  --------------------------------------------------------------
     dist     max/min: %16.8f %16.8f
              avg/std: %16.8f %16.8f
+             mid/dev: %16.8f %16.8f
     energy   max/min: %16.8f %16.8f
              avg/std: %16.8f %16.8f
+       	     mid/dev: %16.8f %16.8f
     gradient max/min: %16.8f %16.8f
              avg/std: %16.8f %16.8f
+       	     mid/dev: %16.8f %16.8f
     nac      max/min: %16.8f %16.8f
              avg/std: %16.8f %16.8f
-""" % (np.amax(invr),np.amin(invr),avg_invr,std_invr,np.amax(energy),np.amin(energy),avg_energy,std_energy,np.amax(gradient),np.amin(gradient),avg_gradient,std_gradient,np.amax(nac),np.amin(nac),avg_nac,std_nac)
+       	     mid/dev: %16.8f %16.8f
+
+""" % (np.amax(invr),np.amin(invr),avg_invr,std_invr,mid_invr,dev_invr,np.amax(energy),np.amin(energy),avg_energy,std_energy,mid_energy,dev_energy,np.amax(gradient),np.amin(gradient),avg_gradient,std_gradient,mid_gradient,dev_gradient,np.amax(nac),np.amin(nac),avg_nac,std_nac,mid_nac,dev_nac)
 
     # shift input to the averaged value and scaled by standard deviation
     invr=(invr-miu_invr)/sgm_invr
@@ -467,6 +491,7 @@ def Main(usage,options):
     global flr,flrstep
     in_data=options.in_data
     pred_data=options.pred_data
+    selc_data=options.selc_data
     silent=options.silent
     gl_seed=options.gl_seed
     in_weight=options.in_weight
@@ -510,7 +535,7 @@ def Main(usage,options):
 
     with open('%s' % in_data,'r') as indata:
         data=json.load(indata)
-    postdata=Prepdata(data,silent,gl_seed,stat)
+    postdata=Prepdata(data,silent,gl_seed,stat,selc_data)
     invr_train=postdata['invr_train']
     invr_val=postdata['invr_val']
     energy_train=postdata['energy_train']
@@ -609,6 +634,27 @@ def Main(usage,options):
         'silent':[silent]
         }
 
+        model_list={
+        'eg':NNEG,
+        'e':NN,
+        'g':NN,
+        'nac':NN
+        }
+
+        y_list={
+        'eg':eg_train,
+        'e':energy_train,
+        'g':gradient_train,
+        'nac':nac_train
+        }
+
+        y_val_list={
+        'eg':eg_val,
+        'e':energy_val,
+        'g':gradient_val,
+        'nac':nac_val
+        }
+
         for i in range(s_iter):
             Permut=len(p['ep'])*len(p['bs'])*len(p['nlayer'])*len(p['node'])*len(p['lr'])*len(p['lr'])*len(p['flrstep'])*len(p['wl2'])
 
@@ -643,18 +689,10 @@ def Main(usage,options):
             if int(nsample*Permut) == 1:
                 break                        # not enough space to search
 
-            if   model_name == 'eg':
-                h = ta.Scan(x=invr_train,y=eg_train,x_val=invr_val,y_val=eg_val,
-                model=NNEG,params=p,experiment_name=model_name,
-                #reduction_method='', reduction_metric='val_mae',
-                random_method='quantum',seed=gl_seed,fraction_limit=nsample)
-
-            elif model_name == 'e':
-                history,model=NN(invr_train,energy_train,invr_val,energy_val,params)
-            elif model_name == 'g':
-                history,model=NN(invr_train,gradient_train,invr_val,gradient_val,params)
-            elif model_name == 'nac':
-                history,model=NN(invr_train,nac_train,invr_val,nac_val,params)
+            h = ta.Scan(x=invr_train,y=y_list[model_name],x_val=invr_val,y_val=y_val_list[model_name],
+            model=model_list[model_name],params=p,experiment_name=model_name,
+            #reduction_method='', reduction_metric='val_mae',
+            random_method='quantum',seed=gl_seed,fraction_limit=nsample)
 
             candidates=np.array(h.data)
             candidates=candidates[np.argsort(candidates[:,1])]   # sort as val_loss
